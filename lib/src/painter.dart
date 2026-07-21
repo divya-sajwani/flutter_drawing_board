@@ -1,5 +1,6 @@
 import 'dart:ui' as ui;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../paint_contents.dart';
@@ -182,7 +183,7 @@ class _PainterState extends State<Painter> {
           child: RepaintBoundary(
             child: CustomPaint(
               isComplex: true,
-              painter: _DeepPainter(controller: widget.drawingController),
+              painter: _DeepPainter(controller: widget.drawingController, devicePixelRatio: MediaQuery.of(context).devicePixelRatio),
               child: RepaintBoundary(
                 child: CustomPaint(
                   isComplex: true,
@@ -223,7 +224,12 @@ class _UpPainter extends CustomPainter {
 
       // 优先使用缓存图像，如果缓存不可用则实时绘制历史内容
       if (controller.cachedImage != null) {
-        canvas.drawImage(controller.cachedImage!, Offset.zero, Paint());
+        canvas.drawImageRect(
+        controller.cachedImage!,
+        Rect.fromLTWH(0, 0, controller.cachedImage!.width.toDouble(), controller.cachedImage!.height.toDouble()),
+        Offset.zero & size,
+        Paint()..filterQuality = FilterQuality.high,
+      );
       } else {
         // 缓存图像还未生成，实时绘制历史内容
         final List<PaintContent> history = controller.getHistory;
@@ -257,71 +263,67 @@ class _UpPainter extends CustomPainter {
 /// Responsible for drawing all historical content and generating cached images
 /// Uses caching mechanism to optimize performance and avoid redundant drawing
 class _DeepPainter extends CustomPainter {
-  _DeepPainter({required this.controller}) : super(repaint: controller.realPainter);
+  _DeepPainter({required this.controller, required this.devicePixelRatio})
+      : super(repaint: controller.realPainter);
   final DrawingController controller;
+  final double devicePixelRatio;
 
-  /// 上次渲染的索引，用于缓存版本控制
-  ///
-  /// Last rendered index for cache version control
   static int _lastRenderedIndex = -1;
-
-  /// 上次渲染的尺寸，用于缓存版本控制
-  ///
-  /// Last rendered size for cache version control
   static Size? _lastRenderedSize;
 
   @override
   void paint(Canvas canvas, Size size) {
-    // 橡皮擦绘制时，屏蔽底层画板的绘制，由顶层画板负责显示
-    if (controller.eraserContent != null) {
-      return;
-    }
+    if (controller.eraserContent != null) return;
 
-    final List<PaintContent> contents = <PaintContent>[
-      ...controller.getHistory,
-    ];
+    final List<PaintContent> contents = <PaintContent>[...controller.getHistory];
+    if (contents.isEmpty) return;
 
-    if (contents.isEmpty) {
-      return;
-    }
-
-    // 检查缓存是否有效：索引相同且尺寸相同
     final bool cacheValid = _lastRenderedIndex == controller.currentIndex &&
         _lastRenderedSize == size &&
         controller.cachedImage != null;
 
     if (cacheValid) {
-      // 直接使用缓存图片，避免重复渲染
-      canvas.drawImage(controller.cachedImage!, Offset.zero, Paint());
+      _drawCached(canvas, size);
       return;
     }
 
+    final int width = (size.width * devicePixelRatio).round();
+    final int height = (size.height * devicePixelRatio).round();
+
     final ui.PictureRecorder recorder = ui.PictureRecorder();
-    final Canvas tempCanvas =
-        Canvas(recorder, Rect.fromPoints(Offset.zero, size.bottomRight(Offset.zero)));
+    final Canvas tempCanvas = Canvas(
+      recorder,
+      Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()), // physical-size cull rect
+    );
+    tempCanvas.scale(devicePixelRatio); // <-- the actual fix: logical draws now fill physical space
 
     canvas.saveLayer(Offset.zero & size, Paint());
-
     for (int i = 0; i < controller.currentIndex; i++) {
-      contents[i].draw(canvas, size, true);
-      contents[i].draw(tempCanvas, size, true);
+      contents[i].draw(canvas, size, true);      // on-screen layer, untouched, still logical
+      contents[i].draw(tempCanvas, size, true);  // cache layer, now scaled correctly
     }
-
     canvas.restore();
 
-    // 更新缓存版本信息
     _lastRenderedIndex = controller.currentIndex;
     _lastRenderedSize = size;
 
     final ui.Picture picture = recorder.endRecording();
 
-    // 只在尺寸有效时生成缓存图片，避免 Invalid image dimensions 异常
-    // Only generate cached image when size is valid to avoid Invalid image dimensions exception
-    if (size.width > 0 && size.height > 0) {
-      picture.toImage(size.width.toInt(), size.height.toInt()).then((ui.Image value) {
+    if (width > 0 && height > 0) {
+      picture.toImage(width, height).then((ui.Image value) {
         controller.cachedImage = value;
       });
     }
+  }
+
+  void _drawCached(Canvas canvas, Size size) {
+    final ui.Image img = controller.cachedImage!;
+    canvas.drawImageRect(
+      img,
+      Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()),
+      Offset.zero & size,
+      Paint()..filterQuality = FilterQuality.high,
+    );
   }
 
   @override
