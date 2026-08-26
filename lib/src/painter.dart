@@ -297,12 +297,41 @@ class _DeepPainter extends CustomPainter {
     );
     tempCanvas.scale(devicePixelRatio); // <-- the actual fix: logical draws now fill physical space
 
-    canvas.saveLayer(Offset.zero & size, Paint());
+    // 只有历史中存在橡皮擦时才需要图层
+    //
+    // The layer exists only so Eraser content, which paints with
+    // BlendMode.clear, has something to clear against. With no eraser in the
+    // visible history it is pure cost, and on Skia that cost is large: a
+    // saveLayer allocates an offscreen render target, switches render pass and
+    // blits back.
+    //
+    // The bounds mattered even more. Passing the whole board made Skia size
+    // that target to the entire canvas - which this app makes several times
+    // the screen - instead of the part actually on screen. Explicit bounds
+    // defeat the surrounding clip, so nothing culled it back down. The clip
+    // bounds are what is really being drawn.
+    bool needsLayer = false;
+    for (int i = 0; i < controller.currentIndex && i < contents.length; i++) {
+      if (contents[i] is Eraser) {
+        needsLayer = true;
+        break;
+      }
+    }
+
+    if (needsLayer) {
+      final Rect layerBounds = canvas.getLocalClipBounds();
+      canvas.saveLayer(
+        layerBounds.isEmpty ? (Offset.zero & size) : layerBounds,
+        Paint(),
+      );
+    }
     for (int i = 0; i < controller.currentIndex; i++) {
       contents[i].draw(canvas, size, true);      // on-screen layer, untouched, still logical
       contents[i].draw(tempCanvas, size, true);  // cache layer, now scaled correctly
     }
-    canvas.restore();
+    if (needsLayer) {
+      canvas.restore();
+    }
 
     _lastRenderedIndex = controller.currentIndex;
     _lastRenderedSize = size;
