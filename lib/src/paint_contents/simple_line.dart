@@ -38,7 +38,12 @@ class SimpleLine extends PaintContent {
     DrawPath? path,
     required Paint paint,
   })  : path = path ?? DrawPath(),
-        super.paint(paint);
+        super.paint(paint) {
+    // 反序列化出来的内容点数不会再变，第一次绘制就可以直接缓存
+    //
+    // Restored content never grows, so let the very first draw cache its path.
+    _lastDrawnPointCount = points?.length ?? -1;
+  }
 
   factory SimpleLine.fromJson(Map<String, dynamic> data) {
     // 兼容旧版本：如果有 points 就用新方式，否则用旧方式
@@ -88,12 +93,37 @@ class SimpleLine extends PaintContent {
   /// Last point position for point filtering optimization
   Offset? _lastPoint;
 
+  /// 缓存的贝塞尔路径，以及缓存对应的点数
+  ///
+  /// 一笔画完之后点列表就不再变化，但底层画板每次重绘都会把每一笔重新绘制一遍。
+  /// 没有缓存时，每一笔都要在每帧重新构建一次 Path —— 开销随"画布上已有的笔画总数"
+  /// 增长，多页共用一个控制器时尤其明显。
+  ///
+  /// Cached bezier path plus the point count it was built from.
+  ///
+  /// Once a stroke is finished its point list never changes again, yet the deep
+  /// layer replays every stroke on each repaint. Without this cache each replay
+  /// rebuilt a Path for every stroke, so the cost grew with the number of
+  /// strokes already on the board - which, when several pages share one
+  /// controller, means it grew with the page count.
+  Path? _cachedPath;
+  int _cachedPointCount = -1;
+
+  /// 上一次绘制时的点数，用于判断这一笔是否已经结束
+  ///
+  /// Point count at the previous draw, used to tell whether the stroke is still
+  /// growing (live) or has settled (finished / restored from JSON).
+  int _lastDrawnPointCount = -1;
+
   @override
   String get contentType => 'SimpleLine';
 
   @override
   void startDraw(Offset startPoint) {
     _lastPoint = startPoint;
+    _cachedPath = null;
+    _cachedPointCount = -1;
+    _lastDrawnPointCount = -1;
 
     if (useBezierCurve) {
       // 使用点列表模式
@@ -152,6 +182,41 @@ class SimpleLine extends PaintContent {
       return;
     }
 
+    canvas.drawPath(_resolveBezierPath(), paint);
+  }
+
+  /// 取得当前点列表对应的贝塞尔路径
+  ///
+  /// 绘制中的一笔每帧都在增加点，此时照常重建（只是这一笔，成本很小）。
+  /// 点数不再变化时说明这一笔已经结束，把路径缓存下来，之后所有重绘直接复用。
+  ///
+  /// Returns the bezier path for the current point list. A live stroke grows
+  /// every frame and is rebuilt as before (one stroke, cheap). Once the point
+  /// count stops changing the stroke is finished, so the path is cached and
+  /// every later repaint reuses it instead of rebuilding.
+  Path _resolveBezierPath() {
+    final int pointCount = points!.length;
+
+    if (_cachedPath != null && _cachedPointCount == pointCount) {
+      return _cachedPath!;
+    }
+
+    final Path bezierPath = _buildBezierPath();
+
+    if (pointCount == _lastDrawnPointCount) {
+      _cachedPath = bezierPath;
+      _cachedPointCount = pointCount;
+    } else {
+      _cachedPath = null;
+      _cachedPointCount = -1;
+    }
+
+    _lastDrawnPointCount = pointCount;
+
+    return bezierPath;
+  }
+
+  Path _buildBezierPath() {
     final Path bezierPath = Path();
     bezierPath.moveTo(points![0].dx, points![0].dy);
 
@@ -186,7 +251,7 @@ class SimpleLine extends PaintContent {
       );
     }
 
-    canvas.drawPath(bezierPath, paint);
+    return bezierPath;
   }
 
   @override
