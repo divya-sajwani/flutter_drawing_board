@@ -662,6 +662,31 @@ class DrawingController extends ChangeNotifier {
     }
   }
 
+  /// Renders the committed drawing history to an image ON DEMAND — e.g. for a
+  /// page thumbnail — WITHOUT the per-stroke `toImage` that caused the writing
+  /// lag. Since `cachedImage` is no longer populated on every stroke (see
+  /// `_DeepPainter`), call this when you actually need a rasterised copy of the
+  /// strokes (thumbnails, exports). Pass a [size], or it defaults to the current
+  /// board size. Returns null if there is nothing to draw or the size is invalid.
+  Future<ui.Image?> renderContentToImage([Size? size]) async {
+    final Size s = size ?? drawConfig.value.size ?? Size.zero;
+    if (s.width <= 0 || s.height <= 0) {
+      return null;
+    }
+    final List<PaintContent> contents = getHistory;
+    if (contents.isEmpty) {
+      return null;
+    }
+    final ui.PictureRecorder recorder = ui.PictureRecorder();
+    final Canvas canvas = Canvas(recorder, Offset.zero & s);
+    canvas.saveLayer(Offset.zero & s, Paint());
+    for (int i = 0; i < _currentIndex; i++) {
+      contents[i].draw(canvas, s, true);
+    }
+    canvas.restore();
+    return recorder.endRecording().toImage(s.width.toInt(), s.height.toInt());
+  }
+
   /// 获取画板内容的JSON列表
   ///
   /// Get JSON list of board content

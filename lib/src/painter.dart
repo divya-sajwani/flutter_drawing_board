@@ -1,6 +1,3 @@
-import 'dart:ui' as ui;
-
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../paint_contents.dart';
@@ -183,7 +180,7 @@ class _PainterState extends State<Painter> {
           child: RepaintBoundary(
             child: CustomPaint(
               isComplex: true,
-              painter: _DeepPainter(controller: widget.drawingController, devicePixelRatio: MediaQuery.of(context).devicePixelRatio),
+              painter: _DeepPainter(controller: widget.drawingController),
               child: RepaintBoundary(
                 child: CustomPaint(
                   isComplex: true,
@@ -224,12 +221,7 @@ class _UpPainter extends CustomPainter {
 
       // 优先使用缓存图像，如果缓存不可用则实时绘制历史内容
       if (controller.cachedImage != null) {
-        canvas.drawImageRect(
-        controller.cachedImage!,
-        Rect.fromLTWH(0, 0, controller.cachedImage!.width.toDouble(), controller.cachedImage!.height.toDouble()),
-        Offset.zero & size,
-        Paint()..filterQuality = FilterQuality.high,
-      );
+        canvas.drawImage(controller.cachedImage!, Offset.zero, Paint());
       } else {
         // 缓存图像还未生成，实时绘制历史内容
         final List<PaintContent> history = controller.getHistory;
@@ -263,39 +255,23 @@ class _UpPainter extends CustomPainter {
 /// Responsible for drawing all historical content and generating cached images
 /// Uses caching mechanism to optimize performance and avoid redundant drawing
 class _DeepPainter extends CustomPainter {
-  _DeepPainter({required this.controller, required this.devicePixelRatio})
-      : super(repaint: controller.realPainter);
+  _DeepPainter({required this.controller}) : super(repaint: controller.realPainter);
   final DrawingController controller;
-  final double devicePixelRatio;
-
-  static int _lastRenderedIndex = -1;
-  static Size? _lastRenderedSize;
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (controller.eraserContent != null) return;
-
-    final List<PaintContent> contents = <PaintContent>[...controller.getHistory];
-    if (contents.isEmpty) return;
-
-    final bool cacheValid = _lastRenderedIndex == controller.currentIndex &&
-        _lastRenderedSize == size &&
-        controller.cachedImage != null;
-
-    if (cacheValid) {
-      _drawCached(canvas, size);
+    // 橡皮擦绘制时，屏蔽底层画板的绘制，由顶层画板负责显示
+    if (controller.eraserContent != null) {
       return;
     }
 
-    final int width = (size.width * devicePixelRatio).round();
-    final int height = (size.height * devicePixelRatio).round();
+    final List<PaintContent> contents = controller.getHistory;
 
-    final ui.PictureRecorder recorder = ui.PictureRecorder();
-    final Canvas tempCanvas = Canvas(
-      recorder,
-      Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()), // physical-size cull rect
-    );
-    tempCanvas.scale(devicePixelRatio); // <-- the actual fix: logical draws now fill physical space
+    if (contents.isEmpty) {
+      return;
+    }
+
+    final int end = controller.currentIndex < contents.length ? controller.currentIndex : contents.length;
 
     // 只有历史中存在橡皮擦时才需要图层
     //
@@ -305,13 +281,14 @@ class _DeepPainter extends CustomPainter {
     // saveLayer allocates an offscreen render target, switches render pass and
     // blits back.
     //
-    // The bounds mattered even more. Passing the whole board made Skia size
-    // that target to the entire canvas - which this app makes several times
-    // the screen - instead of the part actually on screen. Explicit bounds
-    // defeat the surrounding clip, so nothing culled it back down. The clip
-    // bounds are what is really being drawn.
+    // The bounds matter even more. Passing the whole board makes Skia size that
+    // target to the entire canvas - which multi-page layouts make several
+    // screens wide, one screen per page - instead of the part actually on
+    // screen, so the cost of every committed stroke grew with the page count.
+    // Explicit bounds defeat the surrounding clip, so nothing culls it back
+    // down. The clip bounds are what is really being drawn.
     bool needsLayer = false;
-    for (int i = 0; i < controller.currentIndex && i < contents.length; i++) {
+    for (int i = 0; i < end; i++) {
       if (contents[i] is Eraser) {
         needsLayer = true;
         break;
@@ -325,34 +302,14 @@ class _DeepPainter extends CustomPainter {
         Paint(),
       );
     }
-    for (int i = 0; i < controller.currentIndex; i++) {
-      contents[i].draw(canvas, size, true);      // on-screen layer, untouched, still logical
-      contents[i].draw(tempCanvas, size, true);  // cache layer, now scaled correctly
+
+    for (int i = 0; i < end; i++) {
+      contents[i].draw(canvas, size, true);
     }
+
     if (needsLayer) {
       canvas.restore();
     }
-
-    _lastRenderedIndex = controller.currentIndex;
-    _lastRenderedSize = size;
-
-    final ui.Picture picture = recorder.endRecording();
-
-    if (width > 0 && height > 0) {
-      picture.toImage(width, height).then((ui.Image value) {
-        controller.cachedImage = value;
-      });
-    }
-  }
-
-  void _drawCached(Canvas canvas, Size size) {
-    final ui.Image img = controller.cachedImage!;
-    canvas.drawImageRect(
-      img,
-      Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()),
-      Offset.zero & size,
-      Paint()..filterQuality = FilterQuality.high,
-    );
   }
 
   @override
